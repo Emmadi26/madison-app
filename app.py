@@ -128,6 +128,56 @@ def run_rules(df):
 # ---------------------------------------------------------------
 # STEP 3: THE AI EXPLANATION (one call for all problem feeds)
 # ---------------------------------------------------------------
+def _google_error(e):
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    detail = ""
+    try:
+        detail = e.response.json()["error"]["message"][:200]
+    except Exception:
+        pass
+    return code, detail
+
+
+def _call(url, api_key, prompt):
+    resp = requests.post(
+        url,
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        json={
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"},
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    data = json.loads(text.replace("```json", "").replace("```", "").strip())
+    result = {}
+    for item in data:
+        if (item.get("feed") and item.get("explanation") and item.get("action")
+                and item.get("severity") in RANK):
+            result[item["feed"]] = item
+    if not result:
+        raise ValueError("The AI reply had no usable items")
+    return result
+
+
+def discover_models(api_key):
+    """Asks Google which models this key can use, newest flash models first."""
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=100",
+                         headers={"x-goog-api-key": api_key}, timeout=30)
+        r.raise_for_status()
+        names = []
+        for m in r.json().get("models", []):
+            n = m.get("name", "").replace("models/", "")
+            if ("generateContent" in m.get("supportedGenerationMethods", []) and "flash" in n
+                    and not any(w in n for w in ["lite", "image", "tts", "live", "audio", "thinking", "preview", "exp"])):
+                names.append(n)
+        return sorted(names, reverse=True)[:3]
+    except Exception:
+        return []
+
+
 def ask_gemini(problems, api_key):
     lines = []
     for p in problems:
@@ -146,62 +196,44 @@ def ask_gemini(problems, api_key):
         '"severity" (OK, WARNING or CRITICAL), "reason" (why you kept or changed the rule status).'
     )
     api_key = str(api_key).strip().strip('"').strip("'")
-    vertex = f"https://aiplatform.googleapis.com/v1/publishers/google/models/{MODEL}:generateContent"
-    studio = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    urls = [vertex, studio] if api_key.startswith("AQ.") else [studio, vertex]
-    last_error = None
-    for attempt in range(1, MAX_TRIES + 1):
-        for url in urls:
-            try:
-                resp = requests.post(
-                    url,
-                    headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-                    json={
-                        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                        "generationConfig": {"responseMimeType": "application/json"},
-                    },
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                data = json.loads(text.replace("```json", "").replace("```", "").strip())
-                result = {}
-                for item in data:
-                    if (
-                        item.get("feed") and item.get("explanation") and item.get("action")
-                        and item.get("severity") in RANK
-                    ):
-                        result[item["feed"]] = item
-                if not result:
-                    raise ValueError("The AI reply had no usable items")
-                return result
-            except Exception as e:
-                code = getattr(getattr(e, "response", None), "status_code", None)
-                detail = ""
+    vertex = "https://aiplatform.googleapis.com/v1/publishers/google/models/{m}:generateContent"
+    studio = "https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
+    order = [vertex, studio] if api_key.startswith("AQ.") else [studio, vertex]
+    last = "no answer"
+
+    def try_urls(models):
+        nonlocal last
+        for m in models:
+            for u in order:
                 try:
-                    detail = e.response.json()["error"]["message"][:160]
-                except Exception:
-                    pass
-                last_error = RuntimeError(f"status {code}. Google said: {detail}" if code else type(e).__name__)
-                if code in (400, 401, 403, 404):
-                    continue          # try the other Google address
-                break                 # other problems: wait and retry
+                    return _call(u.format(m=m), api_key, prompt)
+                except Exception as e:
+                    code, detail = _google_error(e)
+                    last = f"status {code}. Google said: {detail}" if code else type(e).__name__
+                    if code == 429:
+                        raise RuntimeError(last)
+        return None
+
+    for attempt in range(1, MAX_TRIES + 1):
+        out = try_urls([MODEL])
+        if out:
+            return out
+        if "status 404" in last or "status 400" in last or "status 403" in last:
+            out = try_urls(discover_models(api_key))   # ask Google which models this key can use
+            if out:
+                return out
         if attempt < MAX_TRIES:
-            time.sleep(2 * 2 ** (attempt - 1))  # waits 2s, then 4s
-    raise last_error
+            time.sleep(2 * 2 ** (attempt - 1))
+    raise RuntimeError(last)
 
 
 def friendly_reason(err, has_key):
     if not has_key:
         return "No AI key was found in the app settings (Secrets)."
     e = str(err)
-    if "status 400" in e or "status 401" in e or "status 403" in e:
-        return "Google rejected the AI key. " + e
-    if "404" in e:
-        return "The AI model name was not found."
-    if "429" in e:
+    if "status 429" in e:
         return "The free AI limit was reached. Wait a minute and try again."
-    return "The AI service did not respond (" + e + ")."
+    return "The AI service said no. " + e
 
 
 def add_explanations(results, api_key):
@@ -340,7 +372,7 @@ def main():
                 f"blanks {r['blank_percent']:g}%, {r['hours_late']:g} hours late"
             )
 
-    st.caption("App version 5")
+    st.caption("App version 6")
     st.download_button("Download this report (HTML)", build_html(results),
                        f"madison_report_{date.today()}.html", "text/html")
 
