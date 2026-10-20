@@ -177,9 +177,14 @@ def ask_gemini(problems, api_key):
                 return result
             except Exception as e:
                 code = getattr(getattr(e, "response", None), "status_code", None)
-                last_error = RuntimeError(f"status {code}" if code else type(e).__name__)
-                if code == 404:
-                    continue          # wrong address for this key: try the other one
+                detail = ""
+                try:
+                    detail = e.response.json()["error"]["message"][:160]
+                except Exception:
+                    pass
+                last_error = RuntimeError(f"status {code}. Google said: {detail}" if code else type(e).__name__)
+                if code in (400, 401, 403, 404):
+                    continue          # try the other Google address
                 break                 # other problems: wait and retry
         if attempt < MAX_TRIES:
             time.sleep(2 * 2 ** (attempt - 1))  # waits 2s, then 4s
@@ -190,8 +195,8 @@ def friendly_reason(err, has_key):
     if not has_key:
         return "No AI key was found in the app settings (Secrets)."
     e = str(err)
-    if "400" in e or "403" in e:
-        return "Google rejected the AI key. Check that it was copied correctly and is from aistudio.google.com."
+    if "status 400" in e or "status 401" in e or "status 403" in e:
+        return "Google rejected the AI key. " + e
     if "404" in e:
         return "The AI model name was not found."
     if "429" in e:
@@ -335,7 +340,7 @@ def main():
                 f"blanks {r['blank_percent']:g}%, {r['hours_late']:g} hours late"
             )
 
-    st.caption("App version 4")
+    st.caption("App version 5")
     st.download_button("Download this report (HTML)", build_html(results),
                        f"madison_report_{date.today()}.html", "text/html")
 
