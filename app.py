@@ -145,38 +145,45 @@ def ask_gemini(problems, api_key):
         '"action" (one concrete step to take before the trading desk opens), '
         '"severity" (OK, WARNING or CRITICAL), "reason" (why you kept or changed the rule status).'
     )
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+    api_key = str(api_key).strip().strip('"').strip("'")
+    vertex = f"https://aiplatform.googleapis.com/v1/publishers/google/models/{MODEL}:generateContent"
+    studio = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+    urls = [vertex, studio] if api_key.startswith("AQ.") else [studio, vertex]
     last_error = None
     for attempt in range(1, MAX_TRIES + 1):
-        try:
-            resp = requests.post(
-                url,
-                headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"responseMimeType": "application/json"},
-                },
-                timeout=60,
-            )
-            resp.raise_for_status()
-            text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            data = json.loads(text.replace("```json", "").replace("```", "").strip())
-            result = {}
-            for item in data:
-                if (
-                    item.get("feed") and item.get("explanation") and item.get("action")
-                    and item.get("severity") in RANK
-                ):
-                    result[item["feed"]] = item
-            if not result:
-                raise ValueError("The AI reply had no usable items")
-            return result
-        except Exception as e:  # retry, then give up
-            code = getattr(getattr(e, "response", None), "status_code", None)
-            last_error = RuntimeError(f"status {code}" if code else type(e).__name__)
-            if attempt < MAX_TRIES:
-                time.sleep(2 * 2 ** (attempt - 1))  # waits 2s, then 4s
-    raise RuntimeError(str(last_error))
+        for url in urls:
+            try:
+                resp = requests.post(
+                    url,
+                    headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                    json={
+                        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                        "generationConfig": {"responseMimeType": "application/json"},
+                    },
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                data = json.loads(text.replace("```json", "").replace("```", "").strip())
+                result = {}
+                for item in data:
+                    if (
+                        item.get("feed") and item.get("explanation") and item.get("action")
+                        and item.get("severity") in RANK
+                    ):
+                        result[item["feed"]] = item
+                if not result:
+                    raise ValueError("The AI reply had no usable items")
+                return result
+            except Exception as e:
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                last_error = RuntimeError(f"status {code}" if code else type(e).__name__)
+                if code == 404:
+                    continue          # wrong address for this key: try the other one
+                break                 # other problems: wait and retry
+        if attempt < MAX_TRIES:
+            time.sleep(2 * 2 ** (attempt - 1))  # waits 2s, then 4s
+    raise last_error
 
 
 def friendly_reason(err, has_key):
@@ -328,6 +335,7 @@ def main():
                 f"blanks {r['blank_percent']:g}%, {r['hours_late']:g} hours late"
             )
 
+    st.caption("App version 4")
     st.download_button("Download this report (HTML)", build_html(results),
                        f"madison_report_{date.today()}.html", "text/html")
 
