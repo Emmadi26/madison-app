@@ -10,7 +10,7 @@ import streamlit as st
 # ---------------------------------------------------------------
 # SETTINGS
 # ---------------------------------------------------------------
-MODEL = "gemini-2.5-flash-lite"
+MODEL = "gemini-2.5-flash"
 MAX_FEEDS = 50          # keeps the page fast and protects the free AI quota
 MAX_TRIES = 3           # AI retries
 REQUIRED = ["feed_name", "rows_today", "baseline_rows", "blank_percent", "hours_late"]
@@ -359,6 +359,13 @@ def main():
     c2.metric("Warning", warn)
     c3.metric("OK", good)
 
+    with st.expander("What does Madison check? (click to open)"):
+        st.write("Madison checks three things for every feed:")
+        st.write("- **Row count** against the feed's normal size. Warning if down more than 20%, Critical if down more than 50%.")
+        st.write("- **Blank fields.** Warning above 5% blank, Critical above 20% blank.")
+        st.write("- **Arrival time.** Warning if more than 1 hour late, Critical if more than 4 hours late.")
+        st.write("A feed gets the worst status it earns on any of the three. Madison checks whole feeds, not individual records.")
+
     st.subheader("Results, worst first")
     for r in results:
         title = f"{r['final_status']}: {r['feed']}"
@@ -372,7 +379,7 @@ def main():
                 f"blanks {r['blank_percent']:g}%, {r['hours_late']:g} hours late"
             )
 
-    st.caption("App version 6")
+    st.caption("App version 7")
     st.download_button("Download this report (HTML)", build_html(results),
                        f"madison_report_{date.today()}.html", "text/html")
 
