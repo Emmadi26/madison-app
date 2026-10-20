@@ -10,7 +10,7 @@ import streamlit as st
 # ---------------------------------------------------------------
 # SETTINGS
 # ---------------------------------------------------------------
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-2.5-flash-lite"
 MAX_FEEDS = 50          # keeps the page fast and protects the free AI quota
 MAX_TRIES = 3           # AI retries
 REQUIRED = ["feed_name", "rows_today", "baseline_rows", "blank_percent", "hours_late"]
