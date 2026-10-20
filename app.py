@@ -172,10 +172,24 @@ def ask_gemini(problems, api_key):
                 raise ValueError("The AI reply had no usable items")
             return result
         except Exception as e:  # retry, then give up
-            last_error = e
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            last_error = RuntimeError(f"status {code}" if code else type(e).__name__)
             if attempt < MAX_TRIES:
                 time.sleep(2 * 2 ** (attempt - 1))  # waits 2s, then 4s
     raise RuntimeError(str(last_error))
+
+
+def friendly_reason(err, has_key):
+    if not has_key:
+        return "No AI key was found in the app settings (Secrets)."
+    e = str(err)
+    if "400" in e or "403" in e:
+        return "Google rejected the AI key. Check that it was copied correctly and is from aistudio.google.com."
+    if "404" in e:
+        return "The AI model name was not found."
+    if "429" in e:
+        return "The free AI limit was reached. Wait a minute and try again."
+    return "The AI service did not respond (" + e + ")."
 
 
 def add_explanations(results, api_key):
@@ -183,13 +197,16 @@ def add_explanations(results, api_key):
     problems = [r for r in results if r["status"] != "OK"]
     ai = {}
     ai_ok = True
+    reason = ""
     if problems and api_key:
         try:
             ai = ask_gemini(problems, api_key)
-        except Exception:
+        except Exception as e:
             ai_ok = False
+            reason = friendly_reason(e, True)
     elif problems:
         ai_ok = False
+        reason = friendly_reason("", False)
     for r in results:
         if r["status"] == "OK":
             r.update(final_status="OK", explanation="No issues found.", action="Nothing to do.", ai_used=False)
@@ -202,7 +219,7 @@ def add_explanations(results, api_key):
             r.update(final_status=r["status"],
                      explanation="Automatic explanation unavailable. Problems found: " + "; ".join(r["flags"]) + ".",
                      action="Check this feed by hand before the trading desk opens.", ai_used=False)
-    return results, ai_ok
+    return results, ai_ok, reason
 
 
 # ---------------------------------------------------------------
@@ -277,7 +294,7 @@ def main():
     api_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
     with st.spinner("Checking your feeds. This can take up to a minute..."):
         results = run_rules(df)
-        results, ai_ok = add_explanations(results, api_key)
+        results, ai_ok, reason = add_explanations(results, api_key)
 
     results.sort(key=lambda r: RANK[r["final_status"]], reverse=True)
     crit = sum(r["final_status"] == "CRITICAL" for r in results)
@@ -291,7 +308,7 @@ def main():
     else:
         st.success("All feeds look normal. The desk can open.")
     if not ai_ok:
-        st.info("The AI explanation service was not available, so these results use simple rule-based messages.")
+        st.info("The AI explanation service was not available, so these results use simple rule-based messages. Reason: " + reason)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Critical", crit)
